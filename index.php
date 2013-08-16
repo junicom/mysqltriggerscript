@@ -1,11 +1,11 @@
 <?php
 require 'config.php';
 
-// Pfad für die Formulare
+// Path for the forms action
 $me		= basename(__FILE__);
 $path	= $me . '?action=';
 
-// Speichert die per Formular übertragenen Zugangsdaten
+// Stores the posted data
 $hostname		= isset($_POST['hostname']) ? $_POST['hostname'] : '';
 $username		= isset($_POST['username']) ? $_POST['username'] : '';
 $password		= isset($_POST['password']) ? $_POST['password'] : '';
@@ -13,22 +13,22 @@ $sourceDatabase	= isset($_POST['sourceDatabase']) ? $_POST['sourceDatabase'] : '
 $targetDatabase	= isset($_POST['targetDatabase']) ? $_POST['targetDatabase'] : '';
 $newDatabase	= isset($_POST['newDatabase']) ? $_POST['newDatabase'] : '';
 $port			= isset($_POST['port']) ? (int)$_POST['port'] : 0;
-$action			= isset($_GET['action']) ? $_GET['action'] : '';
+$action			= isset($_GET['action']) ? $_GET['action'] : 'index';
 
 switch ($action) {
 
-	// Zeigt die Wahl der Datenbank an
+	// Select the database to trigger
 	case 'selectDBs':
 		$mysql = new mysqli($hostname, $username, $password, '', $port);
 
-		// Liefert eine Meldung aus, wenn die Verbindung fehlschlägt
+		// Shows the error message when connecting fails
 		if ($mysql->connect_error) {
 			$template = 'connectionError';
 
 			require 'template.php';
 		}
 
-		// Wenn alles geklappt hat, wird das Formular ausgeliefert
+		// When everything works fine, the next form is displayed
 		else {
 			$result		= $mysql->query('SHOW DATABASES');
 			$databases	= array();
@@ -37,102 +37,136 @@ switch ($action) {
 				$databases[] = $db->Database;
 			}
 
-			require 'template.php';
+			require 'tpl/tpl.' . $action . '.php';
 		}
 	break;
 
-	// Zeigt die Auswahl des Triggers an
+	// Select the triggers to create
 	case 'selectTrigger':
 		$mysql		= new mysqli($hostname, $username, $password, $sourceDatabase, $port);
 		$result		= $mysql->query('SHOW TABLES FROM `' . $sourceDatabase . '`');
 
-		require 'template.php';
+		require 'tpl/tpl.' . $action . '.php';
 	break;
 
-	// Erstellt die Trigger
-	case 'createTrigger':
-		$mysql	= new mysqli($hostname, $username, $password, $sourceDatabase, $port);
-		$time	= $_POST['time'];
-		$event	= $_POST['event'];
-		$table	= $_POST['table'];
-		$fields	= $pri = array();
+	// Checks for conflicts with existing triggers
+	case 'checkForConflicts':
+		$mysql		= new mysqli($hostname, $username, $password, $sourceDatabase, $port);
+		$timing		= $_POST['timing'];
+		$event		= $_POST['event'];
+		$tables		= explode(',', $_POST['tables']);
+		$conflicts	= false;
+
+		$result = $mysql->query("SHOW TRIGGERS FROM `" . $sourceDatabase . "`");
+
+		while ($db = $result->fetch_object()) {
+
+			// Conflict
+			if (
+				$timing == $db->Timing &&
+				$event == $db->Event &&
+				in_array($db->Table, $tables)
+			) {
+				$conflicts	= true;
+				$statement	= trim(substr($db->Statement, 5, -3));
+
+				echo '<div class="error">
+					Conflict with existing trigger in table <b>' . $db->Table . '</b>!<br />
+					<input name="include[' . $db->Table . ']" type="checkbox" value="1" /> Include existing statement in new trigger?<br />
+					<a href="javascript:;">Show statement</a>
+					<input name="statement[' . $db->Table . ']" type="hidden" value="' . base64_encode($statement) . '" />
+				</div>
+				<div class="statement"><textarea cols="1" rows="20">' . $statement . '</textarea></div>';
+			}
+		}
+
+		if (!$conflicts) {
+			echo '<div class="success">No conflicts found!</div>';
+		}
+	break;
+
+	// Creates the triggers
+	case 'createTriggers':
+		$mysql		= new mysqli($hostname, $username, $password, $sourceDatabase, $port);
+		$timing		= $_POST['timing'];
+		$event		= $_POST['event'];
+		$table		= $_POST['table'];
+		$include	= $_POST['include'] == '1' ? true : false;
+		$statement	= ($include && isset($_POST['statement'])) ? $_POST['statement'] : '';
+		$fields		= $pri = array();
 
 		if ($targetDatabase == '0') {
 			$targetDatabase = $newDatabase;
 
-			// Erstellt die Zieldatenbank, falls diese nicht existiert
+			// Creates the target database, if it not exists
 			$mysql->query("CREATE DATABASE IF NOT EXISTS `" . $targetDatabase . "`");
 		}
 
-		// Fragt die Spalten der Tabelle ab
+		// Get columns
 		$result = $mysql->query("SHOW COLUMNS FROM `" . $table . "` IN `" . $sourceDatabase . "`");
 
 		while ($column = $result->fetch_object()) {
 
-			// Sammelt alle PrimaryKey-Spalten
+			// Collect all primary_key columns
 			if ($column->Key == 'PRI') {
 				$pri[] = "`" . $column->Field . "`=OLD.`" . $column->Field . "`";
 			}
 
-			// Hängt alle Spalten der Tabelle an ein Array
+			// Add all columns to an array
 			$fields[] = $column->Field;
 		}
 
-		// Wenn mindestens ein PrimaryKey gefunden wurde
+		// If at least one primary_key was found
 		if (!empty($pri)) {
 
-			// Löscht eventuell vorhandene History-Tabellen
+			// Drops existing tables
 			$mysql->query("DROP TABLE IF EXISTS `" . $targetDatabase . "`.`history_" . $table . "`");
 
-			// Erstellt eine leere Kopie der Tabelle
-			// WHERE 1=2 wird nicht true, daher wird kein Inhalt übernommen
+			// Creates an empty copy of the table
+			// WHERE 1=2 will never be true, therefore it has no content
 			$mysql->query("CREATE TABLE `" . $targetDatabase . "`.`history_" . $table . "` AS (SELECT * FROM `" . $table . "` WHERE 1=2)");
 
-			// Fügt bei der history-Tabelle die drei Felder revID, revUser
-			// und revProcess hinzu
+			// Adds required fields to the history table
 			$mysql->query("ALTER TABLE `" . $targetDatabase . "`.`history_" . $table . "` " .
 				"ADD COLUMN `revID` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT FIRST, ADD PRIMARY KEY (`revID`), " .
 				"ADD COLUMN `revUser` VARCHAR(50) NULL DEFAULT NULL AFTER `revID`, " .
 				"ADD COLUMN `revProcess` ENUM('" . implode($eventTypes, "','") . "') NULL DEFAULT NULL AFTER `revUser`");
 
-			// Löscht eventuell vorhandene Trigger
-			$mysql->query("DROP TRIGGER IF EXISTS `" . $table . "_" . ucfirst(strtolower($time)) . ucfirst(strtolower($event)) . "Trigger`");
+			// Deletes existing triggers with the same name
+			$mysql->query("DROP TRIGGER IF EXISTS `" . $table . "_" . ucfirst(strtolower($timing)) . ucfirst(strtolower($event)) . "Trigger`");
 
-			$triggerName = $table . '_' . ucfirst(strtolower($time)) . ucfirst(strtolower($event)) . 'Trigger';
+			$triggerName = $table . '_' . ucfirst(strtolower($timing)) . ucfirst(strtolower($event)) . 'Trigger';
 
-			// Erstellt den Trigger
+			// Creates the trigger
 			$mysql->query(
-				// Setzt den Definer
-				//"CREATE DEFINER=`" . $username . "`@`" . $hostname . "` " .
-				// Setzt den Triggernamen
+				// Sets trigger name				//
 				"CREATE TRIGGER `" . $triggerName . "` " .
-				// Setzt den Zeitpunkt und den Event
-				$time . " " . $event . " ON `" . $table . "` FOR EACH ROW BEGIN \r\n" .
-				// Ereignis
+				// Sets timing and event
+				$timing . " " . $event . " ON `" . $table . "` FOR EACH ROW BEGIN \r\n" .
+				// Statement
+				"\t" . base64_decode($statement) . "\r\n\r\n" .
 				"\tINSERT INTO `" . $targetDatabase . "`.`history_" . $table . "` (\r\n\t\t`" . implode($fields, "`,\r\n\t\t`") . "`,\r\n\t\t`revUser`,\r\n\t\t`revProcess`\r\n\t) " .
 					"SELECT\r\n\t\t`" . implode($fields, "`,\r\n\t\t`") . "`,\r\n\t\tUSER(),\r\n\t\t'" . strtolower($event) . "' " .
 				"\r\n\tFROM\r\n\t\t`" . $table . "`\r\n\tWHERE\r\n\t\t" . implode(" AND ", $pri) . ";\r\nEND");
 
-			// Wenn die Erstellung des Triggers einen Fehler wirft, wird dieser
-			// ausgegeben
+			// If creating fails, error will be displayed
 			if ($mysql->error != '') {
-				echo '<div id="error">Erstellen des Triggers f&uuml;r die Tabelle <b>' . $table . '</b> fehlgeschlagen!<br /><br />' . $mysql->error . '</div>';
+				echo '<div class="error">Unable to create trigger for table <b>' . $table . '</b>!<br />' . $mysql->error . '</div>';
 			}
 
-			// Ansonsten wird eine Erfolgsnachricht ausgegeben
+			// Alternatively success message will be displayed
 			else {
-				echo '<div id="success">Trigger <b>"' . $triggerName . '"</b> f&uuml;r die Tabelle <b>' . $table . '</b> erfolgreich erstellt!</div>';
+				echo '<div class="success">Trigger <b>' . $triggerName . '</b> successfully created!</div>';
 			}
 		}
 
-		// Wenn KEIN PrimaryKey gefunden wurde
-		// TODO: Später Möglichkeit einbauen, selbst ein Bezugsfeld zu bestimmen
+		// If no primary_key exists
 		else {
-			echo '<div id="error">Trigger f&uuml;r die Tabelle <b>' . $table . '</b> konnte nicht erstellt werden!<br /><br />Kein PrimaryKey vorhanden!</div>';
+			echo '<div class="error">Unable to create trigger for table <b>' . $table . '</b> because of missing primary keys!</div>';
 		}
 	break;
 
-	// Fragt die Zugangsdaten des DB-Servers ab
+	// Insert connection data
 	default:
-		require 'template.php';
+		require 'tpl/tpl.' . $action . '.php';
 }
