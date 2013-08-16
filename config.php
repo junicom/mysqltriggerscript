@@ -1,17 +1,16 @@
 <?php
-// Fehlerausgabe
+// Error reporting
 error_reporting(-1);
 ini_set('display_errors', true);
 
-// Mögliche Event-Typen
-// Nicht unterstütze Typen können einfach auskommentiert werden
+// Available event types
+// Just comment out not supported types to disable them
 $eventTypes = array(
-//	'insert', // Derzeit nicht anwendbar
 	'update',
 	'delete'
 );
 
-// Standard-Verbindungsdaten
+// Default connection data
 $stdConnection = array(
 	'hostname'	=> 'localhost',
 	'username'	=> 'root',
